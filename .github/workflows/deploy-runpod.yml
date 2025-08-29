@@ -1,0 +1,172 @@
+name: Deploy SHMT to RunPod
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+        
+    - name: Debug - Check files
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Files in shmt-runpod:"
+        ls -la shmt-runpod/
+        echo "Dockerfile contents:"
+        cat shmt-runpod/Dockerfile
+        
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./shmt-runpod
+        file: ./shmt-runpod/Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/shmt-runpod:latest
+          ${{ secrets.DOCKER_USERNAME }}/shmt-runpod:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Deploy to RunPod
+      run: |
+        echo "🚀 Docker image built and pushed successfully!"
+        echo "🔄 Updating RunPod endpoint..."
+        echo "Endpoint ID (provided): ${{ secrets.RUNPOD_ENDPOINT_ID }}"
+        echo "Endpoint Name (optional): ${{ secrets.RUNPOD_ENDPOINT_NAME }}"
+        echo "Image tags: latest and ${{ github.sha }}"
+        
+        # Test API key first
+        echo "🔍 Testing API key..."
+        TEST_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          "https://api.runpod.io/v2/user/me")
+        echo "User Info: $TEST_RESPONSE"
+        
+        # Try v2 GraphQL API for endpoints
+        echo "🔍 Listing endpoints via GraphQL..."
+        GRAPHQL_RESPONSE=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"query": "query { myself { endpoints { id name templateId } } }"}' \
+          "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+        echo "GraphQL Endpoints: $GRAPHQL_RESPONSE"
+
+        # Resolve endpoint ID by name if provided; else use provided ID
+        ENDPOINT_NAME="${{ secrets.RUNPOD_ENDPOINT_NAME }}"
+        PROVIDED_ID="${{ secrets.RUNPOD_ENDPOINT_ID }}"
+        RESOLVED_ID=$(echo "$GRAPHQL_RESPONSE" | jq -r --arg name "$ENDPOINT_NAME" '.data.myself.endpoints[] | select(.name==$name) | .id')
+        if [ -n "$RESOLVED_ID" ] && [ "$RESOLVED_ID" != "null" ]; then
+          ENDPOINT_ID="$RESOLVED_ID"
+          echo "Resolved Endpoint ID from name: $ENDPOINT_ID"
+        else
+          ENDPOINT_ID="$PROVIDED_ID"
+          echo "Using provided Endpoint ID: $ENDPOINT_ID"
+        fi
+
+        # Install jq for JSON parsing
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo apt-get install -y jq >/dev/null 2>&1 || true
+
+        # Extract templateId for our endpoint
+        TEMPLATE_ID=$(echo "$GRAPHQL_RESPONSE" | jq -r --arg id "$ENDPOINT_ID" '.data.myself.endpoints[] | select(.id==$id) | .templateId')
+        echo "Resolved templateId: ${TEMPLATE_ID}"
+        
+        # Try simple HTTP API for serverless
+        echo "🔍 Trying serverless API..."
+        SERVERLESS_RESPONSE=$(curl -s -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          "https://api.runpod.io/v2/${ENDPOINT_ID}")
+        echo "Serverless Response: $SERVERLESS_RESPONSE"
+        
+        # Try direct endpoint run to see if it exists
+        echo "🔍 Testing endpoint run endpoint..."
+        RUN_RESPONSE=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"input": {"test": "connection"}}' \
+          "https://api.runpod.io/v2/${ENDPOINT_ID}/run")
+        echo "Run Test Response: $RUN_RESPONSE"
+        
+        # Introspect GraphQL schema to find correct fields for updating image
+        echo "🔎 Introspecting GraphQL schema (TemplateInput, EndpointInput, Mutation fields)..."
+        INTROSPECT_TEMPLATE=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"query": "{ __type(name: \"TemplateInput\") { name inputFields { name type { kind name ofType { name kind } } } } }"}' \
+          "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+        echo "TemplateInput: $INTROSPECT_TEMPLATE"
+
+        INTROSPECT_ENDPOINT=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"query": "{ __type(name: \"EndpointInput\") { name inputFields { name type { kind name ofType { name kind } } } } }"}' \
+          "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+        echo "EndpointInput: $INTROSPECT_ENDPOINT"
+
+        INTROSPECT_MUTATIONS=$(curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+          -H "Content-Type: application/json" \
+          -d '{"query": "{ __schema { mutationType { name fields { name args { name type { kind name ofType { name kind } } } } } } }"}' \
+          "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+        echo "Mutations: $INTROSPECT_MUTATIONS"
+
+        # Attempt to update the template image via GraphQL by fetching template details and resubmitting SaveTemplateInput
+        if [ -n "$TEMPLATE_ID" ] && [ "$TEMPLATE_ID" != "null" ]; then
+          echo "🔄 Fetching template details for ${TEMPLATE_ID}..."
+          TEMPLATE_DETAILS=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "query($id: String!) { podTemplate(id: $id) { id name imageName dockerArgs containerDiskInGb volumeInGb env { key value } } }", "variables": {"id": "'"${TEMPLATE_ID}"'"}}' \
+            "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+          echo "Template Details: $TEMPLATE_DETAILS"
+
+          # Build variables JSON for saveTemplate with updated imageName and existing required fields
+          NEW_IMAGE="${{ secrets.DOCKER_USERNAME }}/shmt-runpod:${{ github.sha }}"
+          echo "$TEMPLATE_DETAILS" | jq --arg img "$NEW_IMAGE" '{
+            query: "mutation($input: SaveTemplateInput!) { saveTemplate(input: $input) { id name } }",
+            variables: {
+              input: {
+                id: .data.podTemplate.id,
+                name: .data.podTemplate.name,
+                imageName: $img,
+                dockerArgs: (.data.podTemplate.dockerArgs // ""),
+                containerDiskInGb: (.data.podTemplate.containerDiskInGb // 10),
+                volumeInGb: (.data.podTemplate.volumeInGb // 10),
+                env: (.data.podTemplate.env // [])
+              }
+            }
+          }' > payload.json
+
+          echo "🔄 Submitting saveTemplate with updated imageName..."
+          UPDATE_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.RUNPOD_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            --data-binary @payload.json \
+            "https://api.runpod.io/graphql?api_key=${{ secrets.RUNPOD_API_KEY }}")
+          echo "GraphQL Update Response: $UPDATE_RESPONSE"
+        else
+          echo "⚠️ Could not resolve templateId for endpoint ${ENDPOINT_ID}"
+        fi
+        
+        # Final status
+        echo "ℹ️ If the template update failed, update manually in RunPod Console"
+        echo "📦 Use image: ${{ secrets.DOCKER_USERNAME }}/shmt-runpod:${{ github.sha }} (prefer SHA tag over latest)"
+        
+    - name: Summary
+      run: |
+        echo "✅ SHMT RunPod deployment pipeline completed!"
+        echo "📦 Image: ${{ secrets.DOCKER_USERNAME }}/shmt-runpod:latest"
+        echo "🔗 SHA: ${{ github.sha }}"
