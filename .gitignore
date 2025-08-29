@@ -1,0 +1,12 @@
+.DS_Store
+._*
+.env
+.venv
+__pycache__/
+models/
+*.pth
+*/vq-f4/
+*.zip
+node_modules/
+.idea/
+.vscode/
