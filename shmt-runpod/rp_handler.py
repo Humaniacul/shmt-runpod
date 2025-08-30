@@ -44,21 +44,76 @@ def download_gdrive_file(file_id: str, output_path: FsPath):
         download_file(f"https://drive.google.com/uc?export=download&id={file_id}", output_path)
 
 
+def _is_probably_html(file_path: FsPath) -> bool:
+    try:
+        with open(file_path, 'rb') as f:
+            head = f.read(512)
+            if not head:
+                return True
+            h = head.strip().lower()
+            return h.startswith(b"<") or b"<html" in h or b"<!doctype html" in h
+    except Exception:
+        return True
+
+
+def _validate_download(file_path: FsPath, min_bytes: int, description: str):
+    if not file_path.exists():
+        raise RuntimeError(f"{description} not found after download: {file_path}")
+    size = file_path.stat().st_size
+    if size < min_bytes:
+        raise RuntimeError(f"{description} seems too small ({size} bytes). Possible Google Drive quota/permission page.")
+    if _is_probably_html(file_path):
+        raise RuntimeError(f"{description} appears to be HTML, not a checkpoint. Check Drive permissions/quota.")
+
+
 def setup_shmt_weights():
     models_dir = FsPath("/workspace/models")
     models_dir.mkdir(parents=True, exist_ok=True)
 
     h0_id = os.getenv("MAKEUP_SHMT_H0_ID", "1zed2At-qnIOXewkZsGq8GODEIxmaxMAE")
     h4_id = os.getenv("MAKEUP_SHMT_H4_ID", "19Kt-5wgqyLty_v8G-oez8COjDqEcApDF")
+    h0_url = os.getenv("MAKEUP_SHMT_H0_URL")
+    h4_url = os.getenv("MAKEUP_SHMT_H4_URL")
     vqf4_url = os.getenv("MAKEUP_SHMT_VQF4_URL", "https://ommer-lab.com/files/latent-diffusion/vq-f4.zip")
 
     h0_path = models_dir / "shmt_h0.pth"
     if not h0_path.exists():
-        download_gdrive_file(h0_id, h0_path)
+        if h0_url:
+            download_file(h0_url, h0_path)
+        else:
+            download_gdrive_file(h0_id, h0_path)
+        try:
+            _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
+        except Exception as e:
+            # Retry once via direct URL form
+            try:
+                h0_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if h0_url:
+                download_file(h0_url, h0_path)
+            else:
+                download_file(f"https://drive.google.com/uc?export=download&id={h0_id}", h0_path)
+            _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
 
     h4_path = models_dir / "shmt_h4.pth"
     if not h4_path.exists():
-        download_gdrive_file(h4_id, h4_path)
+        if h4_url:
+            download_file(h4_url, h4_path)
+        else:
+            download_gdrive_file(h4_id, h4_path)
+        try:
+            _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
+        except Exception as e:
+            try:
+                h4_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if h4_url:
+                download_file(h4_url, h4_path)
+            else:
+                download_file(f"https://drive.google.com/uc?export=download&id={h4_id}", h4_path)
+            _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
 
     vqf4_dir = models_dir / "vq-f4"
     vqf4_dir.mkdir(exist_ok=True)
@@ -74,11 +129,23 @@ def setup_shmt_weights():
             break
     if vqf4_path is None:
         z = models_dir / "vq-f4.zip"
+        if z.exists() and z.stat().st_size == 0:
+            try:
+                z.unlink()
+            except Exception:
+                pass
         download_file(vqf4_url, z)
+        # Basic sanity check on zip (should start with PK)
+        with open(z, 'rb') as f:
+            if not f.read(2) == b'PK':
+                raise RuntimeError("Downloaded VQ-F4 archive does not look like a zip; check URL.")
         import zipfile
         with zipfile.ZipFile(z, 'r') as zip_ref:
             zip_ref.extractall(vqf4_dir)
-        z.unlink()
+        try:
+            z.unlink()
+        except Exception:
+            pass
         for cand in candidate_ckpts:
             if cand.exists():
                 vqf4_path = cand
@@ -101,6 +168,9 @@ def setup_shmt_weights():
 
 def load_model_from_config(config, ckpt):
     from ldm.util import instantiate_from_config
+    # Early sanity check to catch HTML/quota pages masquerading as checkpoints
+    if _is_probably_html(FsPath(ckpt)):
+        raise RuntimeError(f"Checkpoint at {ckpt} appears to be HTML (likely Google Drive quota/permission issue).")
     pl_sd = torch.load(ckpt, map_location="cpu")
     sd = pl_sd["state_dict"]
     model = instantiate_from_config(config.model)
@@ -148,9 +218,14 @@ def init_models():
     ensure_shmt_code()
     from ldm.models.diffusion.ddim_test import DDIMSampler
     weights = setup_shmt_weights()
+    if not weights.get('vqf4_path'):
+        raise RuntimeError("VQ-F4 checkpoint not found after download. Verify MAKEUP_SHMT_VQF4_URL.")
     h0_cfg = OmegaConf.load("/workspace/SHMT/configs/latent-diffusion/shmt_h0.yaml")
     h0_cfg.model.params.first_stage_config.params.ckpt_path = weights['vqf4_path']
-    h0 = load_model_from_config(h0_cfg, weights['h0_path'])
+    try:
+        h0 = load_model_from_config(h0_cfg, weights['h0_path'])
+    except Exception as e:
+        raise RuntimeError(f"Failed to load H0 model from {weights['h0_path']}: {e}")
     h0_sampler = DDIMSampler(h0)
     MODELS = {
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -171,13 +246,20 @@ def handler(event):
         inp = event.get("input", {})
         source_url = inp.get("source_url")
         reference_url = inp.get("reference_url")
+        source_image_b64 = inp.get("source_image")
+        reference_image_b64 = inp.get("reference_image")
         ddim_steps = min(100, max(1, int(inp.get("ddim_steps", 50))))
         guidance_scale = max(0.1, min(3.0, float(inp.get("guidance_scale", 1.0))))
 
-        if not source_url or not reference_url:
-            return {"error": "source_url and reference_url are required"}
-        
-        print(f"Processing: source={source_url}, ref={reference_url}, steps={ddim_steps}")
+        has_urls = source_url and reference_url
+        has_b64 = source_image_b64 and reference_image_b64
+        if not has_urls and not has_b64:
+            return {"error": "Either source_url/reference_url OR source_image/reference_image (base64) are required"}
+
+        if has_urls:
+            print(f"Processing via URLs: source={source_url}, ref={reference_url}, steps={ddim_steps}")
+        else:
+            print(f"Processing via base64 images, steps={ddim_steps}")
     except Exception as e:
         return {"error": f"Setup failed: {str(e)}"}
 
@@ -186,9 +268,16 @@ def handler(event):
             td = FsPath(td)
             src_path = td / "src.png"
             ref_path = td / "ref.png"
-            print("Downloading images...")
-            download_file(source_url, src_path)
-            download_file(reference_url, ref_path)
+            if has_urls:
+                print("Downloading images from URLs...")
+                download_file(source_url, src_path)
+                download_file(reference_url, ref_path)
+            else:
+                print("Decoding base64 images...")
+                with open(src_path, "wb") as f:
+                    f.write(base64.b64decode(source_image_b64))
+                with open(ref_path, "wb") as f:
+                    f.write(base64.b64decode(reference_image_b64))
             src_img = Image.open(src_path).convert('RGB')
             ref_img = Image.open(ref_path).convert('RGB')
             print(f"Images loaded: src={src_img.size}, ref={ref_img.size}")
@@ -244,7 +333,7 @@ def handler(event):
             result_img = Image.fromarray((result_np * 255).astype(np.uint8))
 
         print("Inference complete!")
-        return {"image_base64": pil_to_b64(result_img)}
+        return {"image": pil_to_b64(result_img)}
     
     except Exception as e:
         print(f"Inference error: {str(e)}")
