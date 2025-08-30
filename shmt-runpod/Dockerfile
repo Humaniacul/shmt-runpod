@@ -18,6 +18,12 @@ RUN python3 -m pip install --upgrade pip && \
 # Pre-clone SHMT for faster cold starts
 RUN git clone --depth 1 https://github.com/snowfallingplum/shmt.git SHMT || true
 
+# Create directory for optional bundled weights
+RUN mkdir -p /workspace/bundled_models
+
+# Copy optional bundled weights (empty .gitkeep file will be copied if no weights)
+COPY models* /workspace/bundled_models/
+
 COPY rp_handler.py /workspace/rp_handler.py
 
 CMD ["python3", "-u", "/workspace/rp_handler.py"]

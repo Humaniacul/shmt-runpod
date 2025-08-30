@@ -75,45 +75,56 @@ def setup_shmt_weights():
     h0_url = os.getenv("MAKEUP_SHMT_H0_URL")
     h4_url = os.getenv("MAKEUP_SHMT_H4_URL")
     vqf4_url = os.getenv("MAKEUP_SHMT_VQF4_URL", "https://ommer-lab.com/files/latent-diffusion/vq-f4.zip")
-
-    h0_path = models_dir / "shmt_h0.pth"
-    if not h0_path.exists():
-        if h0_url:
-            download_file(h0_url, h0_path)
-        else:
-            download_gdrive_file(h0_id, h0_path)
-        try:
-            _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
-        except Exception as e:
-            # Retry once via direct URL form
-            try:
-                h0_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+    
+    # Check for pre-bundled weights first (for optimized Docker images)
+    bundled_h0 = FsPath("/workspace/bundled_models/shmt_h0.pth")
+    bundled_h4 = FsPath("/workspace/bundled_models/shmt_h4.pth")
+    use_bundled = bundled_h0.exists() and bundled_h4.exists()
+    
+    if use_bundled:
+        print("🎯 Found pre-bundled weights, using them instead of downloading")
+        h0_path = bundled_h0
+        h4_path = bundled_h4
+    else:
+        # Download H0 and H4 as before
+        h0_path = models_dir / "shmt_h0.pth"
+        if not h0_path.exists():
             if h0_url:
                 download_file(h0_url, h0_path)
             else:
-                download_file(f"https://drive.google.com/uc?export=download&id={h0_id}", h0_path)
-            _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
-
-    h4_path = models_dir / "shmt_h4.pth"
-    if not h4_path.exists():
-        if h4_url:
-            download_file(h4_url, h4_path)
-        else:
-            download_gdrive_file(h4_id, h4_path)
-        try:
-            _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
-        except Exception as e:
+                download_gdrive_file(h0_id, h0_path)
             try:
-                h4_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
+            except Exception as e:
+                # Retry once via direct URL form
+                try:
+                    h0_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                if h0_url:
+                    download_file(h0_url, h0_path)
+                else:
+                    download_file(f"https://drive.google.com/uc?export=download&id={h0_id}", h0_path)
+                _validate_download(h0_path, min_bytes=100 * 1024 * 1024, description="H0 checkpoint")
+
+        h4_path = models_dir / "shmt_h4.pth"
+        if not h4_path.exists():
             if h4_url:
                 download_file(h4_url, h4_path)
             else:
-                download_file(f"https://drive.google.com/uc?export=download&id={h4_id}", h4_path)
-            _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
+                download_gdrive_file(h4_id, h4_path)
+            try:
+                _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
+            except Exception as e:
+                try:
+                    h4_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                if h4_url:
+                    download_file(h4_url, h4_path)
+                else:
+                    download_file(f"https://drive.google.com/uc?export=download&id={h4_id}", h4_path)
+                _validate_download(h4_path, min_bytes=100 * 1024 * 1024, description="H4 checkpoint")
 
     vqf4_dir = models_dir / "vq-f4"
     vqf4_dir.mkdir(exist_ok=True)
