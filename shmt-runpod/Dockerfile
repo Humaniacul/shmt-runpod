@@ -22,7 +22,7 @@ RUN git clone --depth 1 https://github.com/snowfallingplum/shmt.git SHMT || true
 RUN mkdir -p /workspace/bundled_models
 
 # Copy optional bundled weights (empty .gitkeep file will be copied if no weights)
-COPY models* /workspace/bundled_models/
+COPY models/ /workspace/bundled_models/
 
 COPY rp_handler.py /workspace/rp_handler.py
 
