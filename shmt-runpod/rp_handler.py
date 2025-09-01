@@ -1,6 +1,5 @@
 # Global model cache
-_models_cacheMODELS = None
-_models_loaded = False
+MODELS = None
 import base64
 import io
 import os
@@ -172,15 +171,6 @@ def setup_shmt_weights():
                         break
                 if vqf4_path is not None:
                     break
-    global MODELS, _models_loaded
-    MODELS = {
-        "device": device,
-        "h0": h0,
-        "h0_sampler": h0_sampler,
-        "vqf4": vqf4
-    }
-    _models_loaded = True
-    print("✅ Models cached for future use")
 
     return {
         "h0_path": str(h0_path),
@@ -232,14 +222,11 @@ MODELS = None
 
 
 def init_models():
-    global MODELS, _models_loaded
-    if _models_loaded and _models_cacheMODELS is not None:
-        print("♻️ Using cached models")
-        return MODELSMODELS
-    print("🚀 Loading models for first time...")
     global MODELS
     if MODELS is not None:
+        print("♻️ Using cached models")
         return MODELS
+    print("�� Loading models for first time...")
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
