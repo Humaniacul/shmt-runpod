@@ -1,3 +1,6 @@
+# Global model cache
+_models_cache = None
+_models_loaded = False
 import base64
 import io
 import os
@@ -169,6 +172,15 @@ def setup_shmt_weights():
                         break
                 if vqf4_path is not None:
                     break
+    global _models_cache, _models_loaded
+    _models_cache = {
+        "device": device,
+        "h0": h0,
+        "h0_sampler": h0_sampler,
+        "vqf4": vqf4
+    }
+    _models_loaded = True
+    print("✅ Models cached for future use")
 
     return {
         "h0_path": str(h0_path),
@@ -220,6 +232,11 @@ MODELS = None
 
 
 def init_models():
+    global _models_cache, _models_loaded
+    if _models_loaded and _models_cache is not None:
+        print("♻️ Using cached models")
+        return _models_cache
+    print("🚀 Loading models for first time...")
     global MODELS
     if MODELS is not None:
         return MODELS
